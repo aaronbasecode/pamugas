@@ -1,7 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useState, useMemo } from 'react';
-import { Client, Deliverable, Invoice, Contract, UserRole, PaymentRail } from '@/types';
+import { Client, Deliverable, Invoice, Contract, UserRole } from '@/types';
 import {
   INITIAL_CLIENTS,
   INITIAL_DELIVERABLES,
@@ -13,6 +13,8 @@ import { calculateNextClient9AM } from './timezone';
 interface PamugasContextType {
   role: UserRole;
   setRole: (role: UserRole) => void;
+  theme: 'dark' | 'light';
+  toggleTheme: () => void;
   selectedClientId: string;
   setSelectedClientId: (id: string) => void;
   clients: Client[];
@@ -32,12 +34,13 @@ interface PamugasContextType {
   resetAllData: () => void;
 }
 
-const STORAGE_KEY = 'pamugas_app_state_v1';
+const STORAGE_KEY = 'pamugas_app_state_v2';
 
 const PamugasContext = createContext<PamugasContextType | undefined>(undefined);
 
 export function PamugasProvider({ children }: { children: React.ReactNode }) {
   const [role, setRole] = useState<UserRole>('agency_admin');
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [selectedClientId, setSelectedClientId] = useState<string>('client-apex');
   const [clients, setClients] = useState<Client[]>(INITIAL_CLIENTS);
   const [deliverables, setDeliverables] = useState<Deliverable[]>(INITIAL_DELIVERABLES);
@@ -46,6 +49,27 @@ export function PamugasProvider({ children }: { children: React.ReactNode }) {
   const [fxRate, setFxRate] = useState<number>(58.85);
   const [fxRateLoading, setFxRateLoading] = useState<boolean>(false);
   const [hydrated, setHydrated] = useState(false);
+
+  // Apply theme to document element
+  const applyTheme = (t: 'dark' | 'light') => {
+    if (typeof document !== 'undefined') {
+      if (t === 'dark') {
+        document.documentElement.classList.add('dark');
+        document.documentElement.setAttribute('data-theme', 'dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+    }
+  };
+
+  const toggleTheme = () => {
+    setTheme((prev) => {
+      const next = prev === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      return next;
+    });
+  };
 
   // Hydrate from localStorage
   useEffect(() => {
@@ -59,9 +83,18 @@ export function PamugasProvider({ children }: { children: React.ReactNode }) {
         if (parsed.contracts) setContracts(parsed.contracts);
         if (parsed.role) setRole(parsed.role);
         if (parsed.selectedClientId) setSelectedClientId(parsed.selectedClientId);
+        if (parsed.theme) {
+          setTheme(parsed.theme);
+          applyTheme(parsed.theme);
+        } else {
+          applyTheme('dark');
+        }
+      } else {
+        applyTheme('dark');
       }
     } catch (e) {
       console.warn('Failed to parse cached state', e);
+      applyTheme('dark');
     } finally {
       setHydrated(true);
     }
@@ -80,12 +113,13 @@ export function PamugasProvider({ children }: { children: React.ReactNode }) {
           contracts,
           role,
           selectedClientId,
+          theme,
         })
       );
     } catch (e) {
       console.warn('Failed to cache state', e);
     }
-  }, [clients, deliverables, invoices, contracts, role, selectedClientId, hydrated]);
+  }, [clients, deliverables, invoices, contracts, role, selectedClientId, theme, hydrated]);
 
   // Fetch live FX rate
   const refreshFxRate = async () => {
@@ -243,6 +277,8 @@ export function PamugasProvider({ children }: { children: React.ReactNode }) {
     setContracts(INITIAL_CONTRACTS);
     setRole('agency_admin');
     setSelectedClientId('client-apex');
+    setTheme('dark');
+    applyTheme('dark');
   };
 
   return (
@@ -250,6 +286,8 @@ export function PamugasProvider({ children }: { children: React.ReactNode }) {
       value={{
         role,
         setRole,
+        theme,
+        toggleTheme,
         selectedClientId,
         setSelectedClientId,
         clients,
