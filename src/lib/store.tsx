@@ -1,56 +1,164 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useState, useMemo } from 'react';
-import { Client, Deliverable, Invoice, Contract, UserRole } from '@/types';
 import {
-  INITIAL_CLIENTS,
-  INITIAL_DELIVERABLES,
-  INITIAL_INVOICES,
-  INITIAL_CONTRACTS,
+  ClosedPayrollRun,
+  DayType,
+  DeMinimisPackage,
+  DtrEntry,
+  Employee,
+  LeaveRequest,
+  LeaveType,
+  LiveTimeSession,
+  NavTab,
+  UserRole,
+} from '@/types';
+import {
+  INITIAL_CLOSED_PAY_RUNS,
+  INITIAL_DTR_ENTRIES,
+  INITIAL_EMPLOYEES,
+  INITIAL_LEAVE_REQUESTS,
 } from './mockData';
-import { calculateNextClient9AM } from './timezone';
+import { calculateDtrMetrics, round2 } from './phPayroll';
+
+export interface ToastNotification {
+  id: string;
+  message: string;
+  type: 'success' | 'info' | 'error';
+}
 
 interface PamugasContextType {
   role: UserRole;
   setRole: (role: UserRole) => void;
+  activeTab: NavTab;
+  setActiveTab: (tab: NavTab) => void;
+  isSidebarOpen: boolean;
+  setIsSidebarOpen: (open: boolean) => void;
+  toggleSidebar: () => void;
   theme: 'dark' | 'light';
   toggleTheme: () => void;
-  selectedClientId: string;
-  setSelectedClientId: (id: string) => void;
-  clients: Client[];
-  deliverables: Deliverable[];
-  invoices: Invoice[];
-  contracts: Contract[];
-  activeClient: Client | undefined;
-  fxRate: number;
-  refreshFxRate: () => Promise<void>;
-  fxRateLoading: boolean;
-  addDeliverable: (deliverable: Omit<Deliverable, 'id' | 'submittedAtPht' | 'scheduledClientRelease' | 'revisionCount' | 'status'>) => void;
-  approveDeliverable: (deliverableId: string) => { success: boolean; message: string };
-  requestRevision: (deliverableId: string, feedback: string) => { success: boolean; message: string };
-  createInvoice: (invoice: Omit<Invoice, 'id' | 'status'>) => void;
-  markInvoicePaid: (invoiceId: string) => void;
-  signContract: (contractId: string, signatureName: string) => void;
+  employees: Employee[];
+  selectedEmployeeId: string;
+  setSelectedEmployeeId: (id: string) => void;
+  activeEmployee: Employee;
+  liveSessions: Record<string, LiveTimeSession>;
+  activeLiveSession: LiveTimeSession | null;
+  dtrEntries: DtrEntry[];
+  leaveRequests: LeaveRequest[];
+  closedPayRuns: ClosedPayrollRun[];
+  clockIn: (dayType?: DayType, convertOtToCto?: boolean) => void;
+  toggleBreak: () => void;
+  clockOut: (notes?: string) => void;
+  toggleLiveSessionCto: () => void;
+  setLiveSessionDayType: (dayType: DayType) => void;
+  addManualDtrEntry: (input: {
+    date: string;
+    dayType: DayType;
+    timeIn: string;
+    timeOut: string;
+    breakMinutes: number;
+    convertOtToCto: boolean;
+    notes?: string;
+  }) => void;
+  toggleDtrEntryCto: (entryId: string) => void;
+  deleteDtrEntry: (entryId: string) => void;
+  updateEmployeeSchedule: (
+    empId: string,
+    patch: Partial<
+      Pick<
+        Employee,
+        | 'shiftStart'
+        | 'shiftEnd'
+        | 'breakMinutes'
+        | 'graceMinutes'
+        | 'restDays'
+        | 'workingDaysPerMonth'
+        | 'monthlyBasic'
+      >
+    >
+  ) => void;
+  updateEmployeeDeMinimis: (empId: string, pkg: DeMinimisPackage) => void;
+  addEmployee: (input: {
+    name: string;
+    position: string;
+    department: string;
+    monthlyBasic: number;
+    shiftStart: string;
+    shiftEnd: string;
+  }) => void;
+  createLeaveRequest: (input: {
+    type: LeaveType;
+    date: string;
+    hours: number;
+    reason: string;
+    isPaid: boolean;
+  }) => void;
+  approveLeaveRequest: (leaveId: string) => void;
+  postPayrollRun: (run: Omit<ClosedPayrollRun, 'id' | 'closedAt'>) => void;
+  updateYtdBonuses: (empId: string, amount: number) => void;
   resetAllData: () => void;
+  toast: ToastNotification | null;
+  showToast: (message: string, type?: 'success' | 'info' | 'error') => void;
+  clearToast: () => void;
 }
 
-const STORAGE_KEY = 'pamugas_app_state_v2';
+const STORAGE_KEY = 'pamugas_ph_payroll_dtr_v1';
 
 const PamugasContext = createContext<PamugasContextType | undefined>(undefined);
 
-export function PamugasProvider({ children }: { children: React.ReactNode }) {
-  const [role, setRole] = useState<UserRole>('agency_admin');
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
-  const [selectedClientId, setSelectedClientId] = useState<string>('client-apex');
-  const [clients, setClients] = useState<Client[]>(INITIAL_CLIENTS);
-  const [deliverables, setDeliverables] = useState<Deliverable[]>(INITIAL_DELIVERABLES);
-  const [invoices, setInvoices] = useState<Invoice[]>(INITIAL_INVOICES);
-  const [contracts, setContracts] = useState<Contract[]>(INITIAL_CONTRACTS);
-  const [fxRate, setFxRate] = useState<number>(58.85);
-  const [fxRateLoading, setFxRateLoading] = useState<boolean>(false);
-  const [hydrated, setHydrated] = useState(false);
+function getManilaDateStr(d = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(d);
+  const y = parts.find((p) => p.type === 'year')?.value || '2026';
+  const m = parts.find((p) => p.type === 'month')?.value || '01';
+  const day = parts.find((p) => p.type === 'day')?.value || '01';
+  return `${y}-${m}-${day}`;
+}
 
-  // Apply theme to document element
+function getManilaHHMM(d = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Manila',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const h = parts.find((p) => p.type === 'hour')?.value || '08';
+  const min = parts.find((p) => p.type === 'minute')?.value || '00';
+  return `${h === '24' ? '00' : h}:${min}`;
+}
+
+export function PamugasProvider({ children }: { children: React.ReactNode }) {
+  const [role, setRole] = useState<UserRole>('payroll_admin');
+  const [activeTab, setActiveTabState] = useState<NavTab>('dtr');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [theme, setTheme] = useState<'dark' | 'light'>('light');
+
+  const [employees, setEmployees] = useState<Employee[]>(INITIAL_EMPLOYEES);
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>('emp-juan');
+  const [liveSessions, setLiveSessions] = useState<Record<string, LiveTimeSession>>({});
+  const [dtrEntries, setDtrEntries] = useState<DtrEntry[]>(INITIAL_DTR_ENTRIES);
+  const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>(INITIAL_LEAVE_REQUESTS);
+  const [closedPayRuns, setClosedPayRuns] = useState<ClosedPayrollRun[]>(INITIAL_CLOSED_PAY_RUNS);
+  const [hydrated, setHydrated] = useState(false);
+  const [toast, setToast] = useState<ToastNotification | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'info' | 'error' = 'info') => {
+    setToast({ id: String(Date.now()), message, type });
+  };
+
+  const clearToast = () => setToast(null);
+
+  const setActiveTab = (tab: NavTab) => {
+    setActiveTabState(tab);
+    setIsSidebarOpen(false);
+  };
+
+  const toggleSidebar = () => setIsSidebarOpen((prev) => !prev);
+
   const applyTheme = (t: 'dark' | 'light') => {
     if (typeof document !== 'undefined') {
       if (t === 'dark') {
@@ -71,214 +179,498 @@ export function PamugasProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
-  // Hydrate from localStorage
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed.clients) setClients(parsed.clients);
-        if (parsed.deliverables) setDeliverables(parsed.deliverables);
-        if (parsed.invoices) setInvoices(parsed.invoices);
-        if (parsed.contracts) setContracts(parsed.contracts);
-        if (parsed.role) setRole(parsed.role);
-        if (parsed.selectedClientId) setSelectedClientId(parsed.selectedClientId);
-        if (parsed.theme) {
-          setTheme(parsed.theme);
-          applyTheme(parsed.theme);
+    const timer = setTimeout(() => {
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed.employees?.length) setEmployees(parsed.employees);
+          if (parsed.selectedEmployeeId) setSelectedEmployeeId(parsed.selectedEmployeeId);
+          if (parsed.liveSessions) setLiveSessions(parsed.liveSessions);
+          if (parsed.dtrEntries) setDtrEntries(parsed.dtrEntries);
+          if (parsed.leaveRequests) setLeaveRequests(parsed.leaveRequests);
+          if (parsed.closedPayRuns) setClosedPayRuns(parsed.closedPayRuns);
+          if (parsed.theme) {
+            setTheme(parsed.theme);
+            applyTheme(parsed.theme);
+          } else {
+            applyTheme('light');
+          }
+          if (parsed.activeTab) setActiveTabState(parsed.activeTab);
+          if (parsed.role) setRole(parsed.role);
         } else {
-          applyTheme('dark');
+          applyTheme('light');
         }
-      } else {
-        applyTheme('dark');
+      } catch {
+        // Ignore corrupt cache
       }
-    } catch (e) {
-      console.warn('Failed to parse cached state', e);
-      applyTheme('dark');
-    } finally {
       setHydrated(true);
-    }
+    }, 0);
+    return () => clearTimeout(timer);
   }, []);
 
-  // Save to localStorage
   useEffect(() => {
     if (!hydrated) return;
     try {
       localStorage.setItem(
         STORAGE_KEY,
         JSON.stringify({
-          clients,
-          deliverables,
-          invoices,
-          contracts,
-          role,
-          selectedClientId,
+          employees,
+          selectedEmployeeId,
+          liveSessions,
+          dtrEntries,
+          leaveRequests,
+          closedPayRuns,
           theme,
+          activeTab,
+          role,
         })
       );
-    } catch (e) {
-      console.warn('Failed to cache state', e);
+    } catch {
+      // Ignore quota errors
     }
-  }, [clients, deliverables, invoices, contracts, role, selectedClientId, theme, hydrated]);
+  }, [
+    hydrated,
+    employees,
+    selectedEmployeeId,
+    liveSessions,
+    dtrEntries,
+    leaveRequests,
+    closedPayRuns,
+    theme,
+    activeTab,
+    role,
+  ]);
 
-  // Fetch live FX rate
-  const refreshFxRate = async () => {
-    setFxRateLoading(true);
-    try {
-      const res = await fetch('/api/fx-rate');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.rate) setFxRate(data.rate);
-      }
-    } catch (err) {
-      console.error('Error fetching FX rate', err);
-    } finally {
-      setFxRateLoading(false);
+  const activeEmployee = useMemo(
+    () => employees.find((e) => e.id === selectedEmployeeId) || employees[0],
+    [employees, selectedEmployeeId]
+  );
+
+  const activeLiveSession = liveSessions[activeEmployee.id] || null;
+
+  const clockIn = (dayType: DayType = 'regular', convertOtToCto = false) => {
+    const now = new Date();
+    const session: LiveTimeSession = {
+      employeeId: activeEmployee.id,
+      isClockedIn: true,
+      isOnBreak: false,
+      date: getManilaDateStr(now),
+      clockInIso: now.toISOString(),
+      accumulatedBreakMinutes: 0,
+      dayType,
+      convertOtToCto,
+    };
+    setLiveSessions((prev) => ({ ...prev, [activeEmployee.id]: session }));
+    showToast(`${activeEmployee.name} clocked in at ${getManilaHHMM(now)} PHT`, 'success');
+  };
+
+  const toggleBreak = () => {
+    const session = liveSessions[activeEmployee.id];
+    if (!session || !session.isClockedIn) return;
+    const now = new Date();
+
+    if (!session.isOnBreak) {
+      setLiveSessions((prev) => ({
+        ...prev,
+        [activeEmployee.id]: {
+          ...session,
+          isOnBreak: true,
+          breakStartIso: now.toISOString(),
+        },
+      }));
+      showToast('Break started — timer paused for unpaid break', 'info');
+    } else {
+      const breakStart = session.breakStartIso ? new Date(session.breakStartIso).getTime() : now.getTime();
+      const addedMin = Math.max(1, Math.round((now.getTime() - breakStart) / 60000));
+      setLiveSessions((prev) => ({
+        ...prev,
+        [activeEmployee.id]: {
+          ...session,
+          isOnBreak: false,
+          breakStartIso: undefined,
+          accumulatedBreakMinutes: session.accumulatedBreakMinutes + addedMin,
+        },
+      }));
+      showToast(`Break ended (${addedMin} mins recorded)`, 'success');
     }
   };
 
-  useEffect(() => {
-    refreshFxRate();
-  }, []);
+  const toggleLiveSessionCto = () => {
+    const session = liveSessions[activeEmployee.id];
+    if (!session) return;
+    setLiveSessions((prev) => ({
+      ...prev,
+      [activeEmployee.id]: { ...session, convertOtToCto: !session.convertOtToCto },
+    }));
+  };
 
-  const activeClient = useMemo(() => {
-    return clients.find((c) => c.id === selectedClientId) || clients[0];
-  }, [clients, selectedClientId]);
+  const setLiveSessionDayType = (dayType: DayType) => {
+    const session = liveSessions[activeEmployee.id];
+    if (!session) return;
+    setLiveSessions((prev) => ({
+      ...prev,
+      [activeEmployee.id]: { ...session, dayType },
+    }));
+  };
 
-  // Add Deliverable
-  const addDeliverable = (
-    data: Omit<Deliverable, 'id' | 'submittedAtPht' | 'scheduledClientRelease' | 'revisionCount' | 'status'>
-  ) => {
-    const targetClient = clients.find((c) => c.id === data.clientId) || activeClient;
-    const nowIso = new Date().toISOString();
+  const clockOut = (notes = 'Live DTR clock session') => {
+    const session = liveSessions[activeEmployee.id];
+    if (!session || !session.isClockedIn) return;
 
-    let scheduledRelease = nowIso;
-    if (data.smartDispatch && targetClient) {
-      scheduledRelease = calculateNextClient9AM(targetClient.timezone);
+    const now = new Date();
+    const inDate = new Date(session.clockInIso);
+    const timeIn = getManilaHHMM(inDate);
+    let timeOut = getManilaHHMM(now);
+
+    // If clicked quickly in demo (< 1 min), ensure minimum 1 min difference or log realistic time
+    let totalBreak = session.accumulatedBreakMinutes;
+    if (session.isOnBreak && session.breakStartIso) {
+      totalBreak += Math.max(
+        0,
+        Math.round((now.getTime() - new Date(session.breakStartIso).getTime()) / 60000)
+      );
     }
 
-    const newDeliverable: Deliverable = {
-      ...data,
-      id: `DEL-${Math.floor(100 + Math.random() * 900)}`,
-      submittedAtPht: nowIso,
-      scheduledClientRelease: scheduledRelease,
-      status: 'pending_review',
-      revisionCount: 0,
+    if (timeOut === timeIn) {
+      // Advance 1 minute for clean representation during instant testing
+      const plusOne = new Date(inDate.getTime() + 60000);
+      timeOut = getManilaHHMM(plusOne);
+    }
+
+    const metrics = calculateDtrMetrics({
+      timeIn,
+      timeOut,
+      breakMinutes: totalBreak,
+      dayType: session.dayType,
+      shiftStart: activeEmployee.shiftStart,
+      shiftEnd: activeEmployee.shiftEnd,
+      graceMinutes: activeEmployee.graceMinutes,
+      convertOtToCto: session.convertOtToCto,
+    });
+
+    const newEntry: DtrEntry = {
+      id: `dtr-${Date.now()}`,
+      employeeId: activeEmployee.id,
+      date: session.date,
+      dayType: session.dayType,
+      timeIn,
+      timeOut,
+      breakMinutes: totalBreak,
+      ...metrics,
+      convertOtToCto: session.convertOtToCto,
+      notes,
     };
 
-    setDeliverables((prev) => [newDeliverable, ...prev]);
-  };
+    setDtrEntries((prev) => [newEntry, ...prev]);
 
-  // Approve Deliverable (Atomic State change)
-  const approveDeliverable = (deliverableId: string) => {
-    const item = deliverables.find((d) => d.id === deliverableId);
-    if (!item) return { success: false, message: 'Deliverable not found' };
-
-    setDeliverables((prev) =>
-      prev.map((d) =>
-        d.id === deliverableId
-          ? {
-              ...d,
-              status: 'approved',
-              approvedAt: new Date().toISOString(),
-            }
-          : d
-      )
-    );
-    return { success: true, message: 'Deliverable approved successfully!' };
-  };
-
-  // Request Revision with quota enforcement
-  const requestRevision = (deliverableId: string, feedback: string) => {
-    const item = deliverables.find((d) => d.id === deliverableId);
-    if (!item) return { success: false, message: 'Deliverable not found' };
-
-    const client = clients.find((c) => c.id === item.clientId);
-    if (!client) return { success: false, message: 'Client not found' };
-
-    // Check revision quota
-    if (client.revisionsUsed >= client.revisionsMax) {
-      return {
-        success: false,
-        message: `Revision quota exceeded (${client.revisionsUsed}/${client.revisionsMax} used). Additional revisions are billed at $65/hr as per contract SLA.`,
-      };
+    if (metrics.ctoHoursCredited > 0) {
+      setEmployees((prev) =>
+        prev.map((e) =>
+          e.id === activeEmployee.id
+            ? {
+                ...e,
+                leaveBalances: {
+                  ...e.leaveBalances,
+                  ctoHours: round2(e.leaveBalances.ctoHours + metrics.ctoHoursCredited),
+                },
+              }
+            : e
+        )
+      );
     }
 
-    // Increment client revision count
-    setClients((prev) =>
-      prev.map((c) =>
-        c.id === client.id ? { ...c, revisionsUsed: c.revisionsUsed + 1 } : c
-      )
-    );
+    setLiveSessions((prev) => {
+      const next = { ...prev };
+      delete next[activeEmployee.id];
+      return next;
+    });
 
-    // Update deliverable
-    setDeliverables((prev) =>
-      prev.map((d) =>
-        d.id === deliverableId
-          ? {
-              ...d,
-              status: 'revision_requested',
-              feedback,
-              revisionCount: d.revisionCount + 1,
-            }
-          : d
-      )
+    showToast(
+      `Clocked out at ${timeOut} PHT (${metrics.regularHours}h reg${
+        metrics.ctoHoursCredited > 0 ? `, +${metrics.ctoHoursCredited}h CTO` : ''
+      })`,
+      'success'
     );
+  };
 
-    return {
-      success: true,
-      message: `Revision requested (${client.revisionsUsed + 1}/${client.revisionsMax} quota used).`,
+  const addManualDtrEntry: PamugasContextType['addManualDtrEntry'] = (input) => {
+    const metrics = calculateDtrMetrics({
+      timeIn: input.timeIn,
+      timeOut: input.timeOut,
+      breakMinutes: input.breakMinutes,
+      dayType: input.dayType,
+      shiftStart: activeEmployee.shiftStart,
+      shiftEnd: activeEmployee.shiftEnd,
+      graceMinutes: activeEmployee.graceMinutes,
+      convertOtToCto: input.convertOtToCto,
+    });
+
+    const entry: DtrEntry = {
+      id: `dtr-${Date.now()}`,
+      employeeId: activeEmployee.id,
+      date: input.date,
+      dayType: input.dayType,
+      timeIn: input.timeIn,
+      timeOut: input.timeOut,
+      breakMinutes: input.breakMinutes,
+      ...metrics,
+      convertOtToCto: input.convertOtToCto,
+      notes: input.notes || 'Manual DTR log',
     };
+
+    setDtrEntries((prev) => [entry, ...prev]);
+    if (metrics.ctoHoursCredited > 0) {
+      setEmployees((prev) =>
+        prev.map((e) =>
+          e.id === activeEmployee.id
+            ? {
+                ...e,
+                leaveBalances: {
+                  ...e.leaveBalances,
+                  ctoHours: round2(e.leaveBalances.ctoHours + metrics.ctoHoursCredited),
+                },
+              }
+            : e
+        )
+      );
+    }
+    showToast(`DTR entry added for ${input.date}`, 'success');
   };
 
-  // Create Invoice
-  const createInvoice = (invoiceData: Omit<Invoice, 'id' | 'status'>) => {
-    const newInvoice: Invoice = {
-      ...invoiceData,
-      id: `INV-2026-${Math.floor(100 + Math.random() * 900)}`,
-      status: 'unpaid',
-    };
-    setInvoices((prev) => [newInvoice, ...prev]);
-  };
+  const toggleDtrEntryCto = (entryId: string) => {
+    const target = dtrEntries.find((e) => e.id === entryId);
+    if (!target) return;
+    const emp = employees.find((e) => e.id === target.employeeId);
+    if (!emp) return;
 
-  // Mark Paid
-  const markInvoicePaid = (invoiceId: string) => {
-    setInvoices((prev) =>
-      prev.map((inv) =>
-        inv.id === invoiceId
-          ? { ...inv, status: 'paid', paidAt: new Date().toISOString().split('T')[0] }
-          : inv
-      )
-    );
-  };
+    const nextConvert = !target.convertOtToCto;
+    const metrics = calculateDtrMetrics({
+      timeIn: target.timeIn,
+      timeOut: target.timeOut,
+      breakMinutes: target.breakMinutes,
+      dayType: target.dayType,
+      shiftStart: emp.shiftStart,
+      shiftEnd: emp.shiftEnd,
+      graceMinutes: emp.graceMinutes,
+      convertOtToCto: nextConvert,
+    });
 
-  // Sign Contract
-  const signContract = (contractId: string, signatureName: string) => {
-    setContracts((prev) =>
-      prev.map((ctr) =>
-        ctr.id === contractId
+    const deltaCto = round2(metrics.ctoHoursCredited - target.ctoHoursCredited);
+
+    setDtrEntries((prev) =>
+      prev.map((e) =>
+        e.id === entryId
           ? {
-              ...ctr,
-              signedByClient: true,
-              signedDate: new Date().toISOString().split('T')[0],
-              signatureName,
+              ...e,
+              convertOtToCto: nextConvert,
+              ctoHoursCredited: metrics.ctoHoursCredited,
             }
-          : ctr
+          : e
       )
+    );
+
+    if (deltaCto !== 0) {
+      setEmployees((prev) =>
+        prev.map((e) =>
+          e.id === emp.id
+            ? {
+                ...e,
+                leaveBalances: {
+                  ...e.leaveBalances,
+                  ctoHours: Math.max(0, round2(e.leaveBalances.ctoHours + deltaCto)),
+                },
+              }
+            : e
+        )
+      );
+    }
+
+    showToast(
+      nextConvert
+        ? `Converted ${target.overtimeHours}h OT into +${metrics.ctoHoursCredited}h CTO credit`
+        : 'Reverted OT hours back to cash overtime pay',
+      'info'
     );
   };
 
-  // Reset to initial
+  const deleteDtrEntry = (entryId: string) => {
+    const target = dtrEntries.find((e) => e.id === entryId);
+    if (!target) return;
+    setDtrEntries((prev) => prev.filter((e) => e.id !== entryId));
+    if (target.ctoHoursCredited > 0) {
+      setEmployees((prev) =>
+        prev.map((e) =>
+          e.id === target.employeeId
+            ? {
+                ...e,
+                leaveBalances: {
+                  ...e.leaveBalances,
+                  ctoHours: Math.max(0, round2(e.leaveBalances.ctoHours - target.ctoHoursCredited)),
+                },
+              }
+            : e
+        )
+      );
+    }
+    showToast('DTR record removed', 'info');
+  };
+
+  const updateEmployeeSchedule: PamugasContextType['updateEmployeeSchedule'] = (empId, patch) => {
+    setEmployees((prev) =>
+      prev.map((e) => (e.id === empId ? { ...e, ...patch } : e))
+    );
+    showToast('Schedule & salary settings updated', 'success');
+  };
+
+  const updateEmployeeDeMinimis = (empId: string, pkg: DeMinimisPackage) => {
+    setEmployees((prev) =>
+      prev.map((e) => (e.id === empId ? { ...e, deMinimis: pkg } : e))
+    );
+    showToast('De Minimis benefit package updated', 'success');
+  };
+
+  const addEmployee: PamugasContextType['addEmployee'] = (input) => {
+    const id = `emp-${Date.now()}`;
+    const num = String(employees.length + 1).padStart(3, '0');
+    const newEmp: Employee = {
+      id,
+      employeeNo: `EMP-2026-${num}`,
+      name: input.name,
+      position: input.position,
+      department: input.department,
+      hireDate: getManilaDateStr(),
+      status: 'active',
+      monthlyBasic: input.monthlyBasic,
+      workingDaysPerMonth: 22,
+      shiftStart: input.shiftStart,
+      shiftEnd: input.shiftEnd,
+      breakMinutes: 60,
+      graceMinutes: 10,
+      restDays: [0, 6],
+      deMinimis: {
+        riceSubsidy: 2000,
+        uniformAllowance: 500,
+        laundryAllowance: 300,
+        medicalCash: 500,
+      },
+      leaveBalances: {
+        vlDays: 10,
+        slDays: 10,
+        ctoHours: 0,
+      },
+      ytdBasicEarned: input.monthlyBasic * 6,
+      ytdBonusesReceived: 0,
+      sssNo: '34-0000000-0',
+      philhealthNo: '02-000000000-0',
+      pagibigNo: '1210-0000-0000',
+      tinNo: '000-000-000-000',
+    };
+    setEmployees((prev) => [...prev, newEmp]);
+    setSelectedEmployeeId(id);
+    showToast(`Added ${input.name} to PH Payroll roster`, 'success');
+  };
+
+  const createLeaveRequest: PamugasContextType['createLeaveRequest'] = (input) => {
+    const req: LeaveRequest = {
+      id: `lv-${Date.now()}`,
+      employeeId: activeEmployee.id,
+      type: input.type,
+      date: input.date,
+      hours: input.hours,
+      reason: input.reason,
+      status: role === 'payroll_admin' ? 'approved' : 'pending',
+      isPaid: input.isPaid,
+    };
+
+    setLeaveRequests((prev) => [req, ...prev]);
+
+    if (req.status === 'approved') {
+      setEmployees((prev) =>
+        prev.map((e) => {
+          if (e.id !== activeEmployee.id) return e;
+          const b = { ...e.leaveBalances };
+          if (input.type === 'CTO') b.ctoHours = Math.max(0, round2(b.ctoHours - input.hours));
+          if (input.type === 'VL' || input.type === 'SIL') {
+            b.vlDays = Math.max(0, round2(b.vlDays - input.hours / 8));
+          }
+          if (input.type === 'SL') b.slDays = Math.max(0, round2(b.slDays - input.hours / 8));
+          return { ...e, leaveBalances: b };
+        })
+      );
+    }
+
+    showToast(
+      req.status === 'approved'
+        ? `${input.type} leave (${input.hours}h) approved and reflected in pay run`
+        : `${input.type} leave request submitted for approval`,
+      'success'
+    );
+  };
+
+  const approveLeaveRequest = (leaveId: string) => {
+    const target = leaveRequests.find((l) => l.id === leaveId);
+    if (!target || target.status === 'approved') return;
+
+    setLeaveRequests((prev) =>
+      prev.map((l) => (l.id === leaveId ? { ...l, status: 'approved' } : l))
+    );
+
+    setEmployees((prev) =>
+      prev.map((e) => {
+        if (e.id !== target.employeeId) return e;
+        const b = { ...e.leaveBalances };
+        if (target.type === 'CTO') b.ctoHours = Math.max(0, round2(b.ctoHours - target.hours));
+        if (target.type === 'VL' || target.type === 'SIL') {
+          b.vlDays = Math.max(0, round2(b.vlDays - target.hours / 8));
+        }
+        if (target.type === 'SL') b.slDays = Math.max(0, round2(b.slDays - target.hours / 8));
+        return { ...e, leaveBalances: b };
+      })
+    );
+    showToast('Leave approved and deducted from balance', 'success');
+  };
+
+  const postPayrollRun = (run: Omit<ClosedPayrollRun, 'id' | 'closedAt'>) => {
+    const record: ClosedPayrollRun = {
+      ...run,
+      id: `run-${Date.now()}`,
+      closedAt: new Date().toISOString(),
+    };
+    setClosedPayRuns((prev) => [record, ...prev]);
+    setEmployees((prev) =>
+      prev.map((e) =>
+        e.id === run.employeeId
+          ? {
+              ...e,
+              ytdBasicEarned: round2(e.ytdBasicEarned + run.basicPayEarned),
+              ytdBonusesReceived: round2(e.ytdBonusesReceived + run.taxableBonusIncluded),
+            }
+          : e
+      )
+    );
+    showToast(
+      `Posted payroll run (${run.periodLabel}) — 13th Month & ₱90k YTD updated`,
+      'success'
+    );
+  };
+
+  const updateYtdBonuses = (empId: string, amount: number) => {
+    setEmployees((prev) =>
+      prev.map((e) => (e.id === empId ? { ...e, ytdBonusesReceived: Math.max(0, amount) } : e))
+    );
+  };
+
   const resetAllData = () => {
     localStorage.removeItem(STORAGE_KEY);
-    setClients(INITIAL_CLIENTS);
-    setDeliverables(INITIAL_DELIVERABLES);
-    setInvoices(INITIAL_INVOICES);
-    setContracts(INITIAL_CONTRACTS);
-    setRole('agency_admin');
-    setSelectedClientId('client-apex');
-    setTheme('dark');
-    applyTheme('dark');
+    setEmployees(INITIAL_EMPLOYEES);
+    setSelectedEmployeeId('emp-juan');
+    setLiveSessions({});
+    setDtrEntries(INITIAL_DTR_ENTRIES);
+    setLeaveRequests(INITIAL_LEAVE_REQUESTS);
+    setClosedPayRuns(INITIAL_CLOSED_PAY_RUNS);
+    showToast('Reset all DTR & Payroll data to defaults', 'info');
   };
 
   return (
@@ -286,25 +678,41 @@ export function PamugasProvider({ children }: { children: React.ReactNode }) {
       value={{
         role,
         setRole,
+        activeTab,
+        setActiveTab,
+        isSidebarOpen,
+        setIsSidebarOpen,
+        toggleSidebar,
         theme,
         toggleTheme,
-        selectedClientId,
-        setSelectedClientId,
-        clients,
-        deliverables,
-        invoices,
-        contracts,
-        activeClient,
-        fxRate,
-        refreshFxRate,
-        fxRateLoading,
-        addDeliverable,
-        approveDeliverable,
-        requestRevision,
-        createInvoice,
-        markInvoicePaid,
-        signContract,
+        employees,
+        selectedEmployeeId,
+        setSelectedEmployeeId,
+        activeEmployee,
+        liveSessions,
+        activeLiveSession,
+        dtrEntries,
+        leaveRequests,
+        closedPayRuns,
+        clockIn,
+        toggleBreak,
+        clockOut,
+        toggleLiveSessionCto,
+        setLiveSessionDayType,
+        addManualDtrEntry,
+        toggleDtrEntryCto,
+        deleteDtrEntry,
+        updateEmployeeSchedule,
+        updateEmployeeDeMinimis,
+        addEmployee,
+        createLeaveRequest,
+        approveLeaveRequest,
+        postPayrollRun,
+        updateYtdBonuses,
         resetAllData,
+        toast,
+        showToast,
+        clearToast,
       }}
     >
       {children}
@@ -313,9 +721,7 @@ export function PamugasProvider({ children }: { children: React.ReactNode }) {
 }
 
 export function usePamugas() {
-  const context = useContext(PamugasContext);
-  if (!context) {
-    throw new Error('usePamugas must be used within a PamugasProvider');
-  }
-  return context;
+  const ctx = useContext(PamugasContext);
+  if (!ctx) throw new Error('usePamugas must be used inside PamugasProvider');
+  return ctx;
 }

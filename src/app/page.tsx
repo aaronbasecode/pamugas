@@ -1,102 +1,46 @@
 'use client';
 
-import React, { useState } from 'react';
+import React from 'react';
 import Header from '@/components/Header';
-import TimezoneTicker from '@/components/TimezoneTicker';
-import DeliverablesQueue from '@/components/DeliverablesQueue';
-import BillingHub from '@/components/BillingHub';
-import ContractsSla from '@/components/ContractsSla';
-import ClientsOverview from '@/components/ClientsOverview';
+import Sidebar from '@/components/Sidebar';
+import PayrollModulesOverview from '@/components/PayrollModulesOverview';
+import DtrTimekeeping from '@/components/DtrTimekeeping';
+import PayrollCalculator from '@/components/PayrollCalculator';
+import ScheduleLeaveCto from '@/components/ScheduleLeaveCto';
+import AnnualBenefitsTracker from '@/components/AnnualBenefitsTracker';
+import TerminationFinalPay from '@/components/TerminationFinalPay';
+import Toast from '@/components/Toast';
 import { usePamugas } from '@/lib/store';
-import {
-  FileCheck2,
-  DollarSign,
-  FileSignature,
-  Building,
-  Sparkles,
-} from 'lucide-react';
 
 export default function Home() {
-  const { role } = usePamugas();
-  const [activeTab, setActiveTab] = useState<'deliverables' | 'billing' | 'contracts' | 'clients'>('deliverables');
+  const { activeTab, activeEmployee } = usePamugas();
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col transition-colors">
-      <Header />
+    <div className="min-h-screen bg-slate-100/70 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex transition-colors overflow-x-clip">
+      {/* Sidebar Navigation */}
+      <Sidebar />
 
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Timezone & Collaboration Ticker */}
-        <TimezoneTicker />
+      {/* Main Content Column */}
+      <div className="flex-1 flex flex-col min-w-0">
+        <Header />
 
-        {/* Navigation Tabs */}
-        <div className="flex items-center gap-1 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 p-1 text-xs sm:text-sm font-medium overflow-x-auto shadow-sm">
-          <button
-            onClick={() => setActiveTab('deliverables')}
-            className={`flex items-center gap-2 rounded-xl px-4 py-2 transition-all whitespace-nowrap ${
-              activeTab === 'deliverables'
-                ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800/50'
-            }`}
-          >
-            <FileCheck2 className="h-4 w-4" />
-            <span>Deliverables & Approvals</span>
-          </button>
+        <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 max-w-7xl w-full mx-auto">
+          {activeTab === 'overview' && <PayrollModulesOverview key={activeEmployee.id} />}
+          {activeTab === 'dtr' && <DtrTimekeeping key={activeEmployee.id} />}
+          {activeTab === 'payroll' && <PayrollCalculator key={activeEmployee.id} />}
+          {activeTab === 'schedule' && <ScheduleLeaveCto key={activeEmployee.id} />}
+          {activeTab === 'annual' && <AnnualBenefitsTracker key={activeEmployee.id} />}
+          {activeTab === 'termination' && <TerminationFinalPay key={activeEmployee.id} />}
+        </main>
 
-          <button
-            onClick={() => setActiveTab('billing')}
-            className={`flex items-center gap-2 rounded-xl px-4 py-2 transition-all whitespace-nowrap ${
-              activeTab === 'billing'
-                ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800/50'
-            }`}
-          >
-            <DollarSign className="h-4 w-4" />
-            <span>Dual-Currency (USD/PHP) & BIR Billing</span>
-          </button>
+        {/* Footer */}
+        <footer className="mt-auto py-5 text-center text-xs text-slate-500 px-4">
+          Pamugas PH Payroll &amp; DTR Tracker · SSS, PhilHealth, Pag-IBIG &amp; BIR TRAIN Law Compliant
+        </footer>
+      </div>
 
-          <button
-            onClick={() => setActiveTab('contracts')}
-            className={`flex items-center gap-2 rounded-xl px-4 py-2 transition-all whitespace-nowrap ${
-              activeTab === 'contracts'
-                ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800/50'
-            }`}
-          >
-            <FileSignature className="h-4 w-4" />
-            <span>Contracts & SLAs</span>
-          </button>
-
-          {role === 'agency_admin' && (
-            <button
-              onClick={() => setActiveTab('clients')}
-              className={`flex items-center gap-2 rounded-xl px-4 py-2 transition-all whitespace-nowrap ${
-                activeTab === 'clients'
-                  ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800/50'
-              }`}
-            >
-              <Building className="h-4 w-4" />
-              <span>Agency Accounts</span>
-            </button>
-          )}
-        </div>
-
-        {/* Tab Content Panels */}
-        <div className="pt-2">
-          {activeTab === 'deliverables' && <DeliverablesQueue />}
-          {activeTab === 'billing' && <BillingHub />}
-          {activeTab === 'contracts' && <ContractsSla />}
-          {activeTab === 'clients' && role === 'agency_admin' && <ClientsOverview />}
-        </div>
-      </main>
-
-      {/* Footer */}
-      <footer className="mt-12 border-t border-slate-200 dark:border-slate-900 bg-white dark:bg-slate-950 py-6 text-center text-xs text-slate-500 transition-colors">
-        <p className="flex items-center justify-center gap-1.5">
-          <Sparkles className="h-3.5 w-3.5 text-amber-500 dark:text-amber-400" />
-          <span>Pamugas Operations Portal · Built for Philippine Digital Agencies (SEO, Ads, Content)</span>
-        </p>
-      </footer>
+      {/* Floating Global Toast Notifications */}
+      <Toast />
     </div>
   );
 }
